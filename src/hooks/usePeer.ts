@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Peer, { MediaConnection } from 'peerjs';
 
+const generateVoxNumber = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit number
+};
+
 export const usePeer = () => {
   const [peerId, setPeerId] = useState<string>('');
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -16,15 +20,28 @@ export const usePeer = () => {
     if (currentCallRef.current) {
       currentCallRef.current.close();
     }
+    
+    // Stop and clear local stream
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      setLocalStream(null);
+    }
+
     setRemoteStream(null);
     setCallActive(false);
     currentCallRef.current = null;
-  }, []);
+  }, [localStream]);
 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const peer = new Peer();
+    let savedId = localStorage.getItem('vox_call_id');
+    if (!savedId) {
+      savedId = generateVoxNumber();
+      localStorage.setItem('vox_call_id', savedId);
+    }
+
+    const peer = new Peer(savedId);
     peerRef.current = peer;
 
     peer.on('open', (id) => {
@@ -42,23 +59,29 @@ export const usePeer = () => {
       setCallActive(false);
     });
 
-    // Get local media
-    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-      .then((stream) => {
-        setLocalStream(stream);
-      })
-      .catch((err) => {
-        console.error('Failed to get local stream', err);
-      });
-
     return () => {
       peer.destroy();
     };
   }, []);
 
-  const answerCall = useCallback(() => {
-    if (incomingCall && localStream) {
-      incomingCall.answer(localStream);
+  const requestLocalStream = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      setLocalStream(stream);
+      return stream;
+    } catch (err) {
+      console.error('Failed to get local stream', err);
+      setError('Microphone access denied. Please allow mic access to make calls.');
+      return null;
+    }
+  };
+
+  const answerCall = useCallback(async () => {
+    if (incomingCall) {
+      const stream = await requestLocalStream();
+      if (!stream) return;
+
+      incomingCall.answer(stream);
       incomingCall.on('stream', (userRemoteStream) => {
         setRemoteStream(userRemoteStream);
       });
@@ -71,7 +94,7 @@ export const usePeer = () => {
       setIncomingCall(null);
       setCallActive(true);
     }
-  }, [incomingCall, localStream, endCall]);
+  }, [incomingCall, endCall]);
 
   const rejectCall = useCallback(() => {
     if (incomingCall) {
@@ -80,9 +103,12 @@ export const usePeer = () => {
     }
   }, [incomingCall]);
 
-  const startCall = useCallback((remoteId: string) => {
-    if (peerRef.current && localStream) {
-      const call = peerRef.current.call(remoteId, localStream);
+  const startCall = useCallback(async (remoteId: string) => {
+    if (peerRef.current) {
+      const stream = await requestLocalStream();
+      if (!stream) return;
+
+      const call = peerRef.current.call(remoteId, stream);
       call.on('stream', (userRemoteStream) => {
         setRemoteStream(userRemoteStream);
       });
@@ -92,8 +118,12 @@ export const usePeer = () => {
       call.on('close', () => {
         endCall();
       });
+      
+      call.on('error', () => {
+        endCall();
+      });
     }
-  }, [localStream, endCall]);
+  }, [endCall]);
 
   const toggleMute = useCallback(() => {
     if (localStream) {
